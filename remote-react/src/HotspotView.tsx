@@ -4,52 +4,60 @@ import {
 } from '@mui/material';
 import type { AnalysisResponse, RecommendationResponse } from '@acp/contracts';
 import { EVENT_NAMES } from '@acp/contracts';
-import { api, newCorrelationId } from './api';
-import { useRemote } from './context';
+import { api, newCorrelationId, type FailureCode } from './api';
+import { useRemote, type RemoteContextValue } from './context';
 import { KpiCard } from './KpiCard';
 import { RecommendationCard } from './RecommendationCard';
 import { SimulationPanel } from './SimulationPanel';
 import { AdvisoryBanner, ErrorState, LoadingSkeleton, NoSafeRecommendation, SyntheticBadge } from './StateViews';
 import { useAsync } from './useAsync';
 
-interface Loaded { analysis: AnalysisResponse; recommendation: RecommendationResponse; cid: string }
+interface LoadedHotspotData { analysis: AnalysisResponse; recommendation: RecommendationResponse; correlationId: string }
+
+/** Fetches the hotspot analysis and current recommendation together, publishing lifecycle events as it goes. */
+async function loadHotspotData(
+  apiBaseUrl: string, correlationId: string, publish: RemoteContextValue['publish'], signal: AbortSignal,
+): Promise<LoadedHotspotData> {
+  publish(EVENT_NAMES.analysisStarted, { v: 1, correlationId });
+  try {
+    const [analysis, recommendation] = await Promise.all([
+      api.analysis(apiBaseUrl, correlationId, signal),
+      api.recommendation(apiBaseUrl, signal),
+    ]);
+    if (!signal.aborted) {
+      publish(EVENT_NAMES.analysisCompleted, {
+        v: 1, correlationId, hotspotFound: analysis.hotspot !== null,
+        reductionKgCO2e: recommendation.recommendation?.expectedReductionKgCO2e ?? null,
+      });
+    }
+    return { analysis, recommendation, correlationId };
+  } catch (error) {
+    if (!signal.aborted) {
+      const failureCode = (error as { code?: string }).code;
+      const knownFailureCodes: FailureCode[] = ['TIMEOUT', 'INVALID_DATA', 'SERVER'];
+      publish(EVENT_NAMES.analysisFailed, {
+        v: 1, correlationId,
+        code: (knownFailureCodes as string[]).includes(failureCode ?? '') ? (failureCode as FailureCode) : 'NETWORK',
+      });
+    }
+    throw error;
+  }
+}
 
 export default function HotspotView() {
   const { props, publish } = useRemote();
-  const cidRef = useRef(newCorrelationId());
+  const correlationIdRef = useRef(newCorrelationId());
 
-  const state = useAsync<Loaded>(async (signal) => {
-    const cid = cidRef.current;
-    publish(EVENT_NAMES.analysisStarted, { v: 1, correlationId: cid });
-    try {
-      const [analysis, recommendation] = await Promise.all([
-        api.analysis(props.apiBaseUrl, cid, signal),
-        api.recommendation(props.apiBaseUrl, signal),
-      ]);
-      if (!signal.aborted) {
-        publish(EVENT_NAMES.analysisCompleted, {
-          v: 1, correlationId: cid, hotspotFound: analysis.hotspot !== null,
-          reductionKgCO2e: recommendation.recommendation?.expectedReductionKgCO2e ?? null,
-        });
-      }
-      return { analysis, recommendation, cid };
-    } catch (e) {
-      if (!signal.aborted) {
-        const code = (e as { code?: string }).code;
-        publish(EVENT_NAMES.analysisFailed, {
-          v: 1, correlationId: cid,
-          code: code === 'TIMEOUT' || code === 'INVALID_DATA' || code === 'SERVER' ? code : 'NETWORK',
-        });
-      }
-      throw e;
-    }
-  }, [props.apiBaseUrl]);
+  const state = useAsync<LoadedHotspotData>(
+    (signal) => loadHotspotData(props.apiBaseUrl, correlationIdRef.current, publish, signal),
+    [props.apiBaseUrl],
+  );
 
   if (state.status === 'loading') return <LoadingSkeleton label="Analysing synthetic data" />;
   if (state.status === 'error') return <ErrorState code={state.code} />;
 
-  const { analysis, recommendation, cid } = state.data;
-  const h = analysis.hotspot;
+  const { analysis, recommendation, correlationId } = state.data;
+  const hotspot = analysis.hotspot;
   return (
     <section aria-labelledby="hs-title" style={{ display: 'grid', gap: 16 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -57,28 +65,28 @@ export default function HotspotView() {
         <SyntheticBadge />
         <Chip color="warning" label="Advisory only" />
       </div>
-      {!h || !recommendation.recommendation ? (
+      {!hotspot || !recommendation.recommendation ? (
         <NoSafeRecommendation />
       ) : (
         <>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-            <KpiCard label="Operational source" value={h.label} caption={`Zone ${h.zoneId} (fictional)`} />
-            <KpiCard label="Current emissions" value={`${h.kgCO2e.toLocaleString('en-US')} kgCO2e`} caption={h.baselinePeriod.label} />
-            <KpiCard label="Estimated avoidable (simulated)" value={`${h.avoidableKgCO2e.toLocaleString('en-US')} kgCO2e`} caption={`${h.contributionPct}% of total emissions come from this source`} />
+            <KpiCard label="Operational source" value={hotspot.label} caption={`Zone ${hotspot.zoneId} (fictional)`} />
+            <KpiCard label="Current emissions" value={`${hotspot.kgCO2e.toLocaleString('en-US')} kgCO2e`} caption={hotspot.baselinePeriod.label} />
+            <KpiCard label="Estimated avoidable (simulated)" value={`${hotspot.avoidableKgCO2e.toLocaleString('en-US')} kgCO2e`} caption={`${hotspot.contributionPct}% of total emissions come from this source`} />
             <KpiCard
               label="Evidence strength"
-              value={`${Math.round(h.confidence * 100)} / 100`}
+              value={`${Math.round(hotspot.confidence * 100)} / 100`}
               caption="Indicates evidence strength, not certainty"
-              hint={`Confidence = 0.4 × completeness (${h.confidenceBreakdown.completeness}) + 0.3 × measured share (${h.confidenceBreakdown.measuredShare}) + 0.3 × repeatability (${h.confidenceBreakdown.repeatability}). Threshold ${analysis.confidenceThreshold}.`}
+              hint={`Confidence = 0.4 × completeness (${hotspot.confidenceBreakdown.completeness}) + 0.3 × measured share (${hotspot.confidenceBreakdown.measuredShare}) + 0.3 × repeatability (${hotspot.confidenceBreakdown.repeatability}). Threshold ${analysis.confidenceThreshold}.`}
             />
           </div>
           <Card>
             <CardContent>
             <Typography variant="h5" component="h3" fontWeight={600}>Why this hotspot was selected</Typography>
-            <Typography component="p">{h.selectionReason}</Typography>
-            <Typography component="p"><strong>Supporting operational pattern: </strong>{h.supportingPattern}</Typography>
+            <Typography component="p">{hotspot.selectionReason}</Typography>
+            <Typography component="p"><strong>Supporting operational pattern: </strong>{hotspot.supportingPattern}</Typography>
             <Typography variant="h6" component="h4" fontWeight={600}>Known uncertainties and limitations</Typography>
-            <ul>{h.uncertainties.map((u) => <li key={u}>{u}</li>)}</ul>
+            <ul>{hotspot.uncertainties.map((uncertainty) => <li key={uncertainty}>{uncertainty}</li>)}</ul>
             </CardContent>
           </Card>
           <Card>
@@ -96,17 +104,21 @@ export default function HotspotView() {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {analysis.candidates.map((c) => (
-                  <TableRow key={`${c.categoryId}-${c.zoneId}`}>
-                    <TableCell>{c.label}</TableCell>
-                    <TableCell>{c.zoneId}</TableCell>
-                    <TableCell>{c.avoidableKgCO2e.toLocaleString('en-US')}</TableCell>
-                    <TableCell>{c.confidence}</TableCell>
+                {analysis.candidates.map((candidate) => (
+                  <TableRow key={`${candidate.categoryId}-${candidate.zoneId}`}>
+                    <TableCell>{candidate.label}</TableCell>
+                    <TableCell>{candidate.zoneId}</TableCell>
+                    <TableCell>{candidate.avoidableKgCO2e.toLocaleString('en-US')}</TableCell>
+                    <TableCell>{candidate.confidence}</TableCell>
                     <TableCell>
-                      <Tooltip title={c.reason} describeChild>
-                        <Chip tabIndex={0} size="small" variant={c.selected ? 'filled' : 'outlined'} color={c.selected ? 'primary' : 'default'} label={c.selected ? 'Selected' : 'Not selected'} />
+                      <Tooltip title={candidate.reason} describeChild>
+                        <Chip
+                          tabIndex={0} size="small" variant={candidate.selected ? 'filled' : 'outlined'}
+                          color={candidate.selected ? 'primary' : 'default'}
+                          label={candidate.selected ? 'Selected' : 'Not selected'}
+                        />
                       </Tooltip>{' '}
-                      <Typography variant="body2" component="span">{c.reason}</Typography>
+                      <Typography variant="body2" component="span">{candidate.reason}</Typography>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -117,7 +129,7 @@ export default function HotspotView() {
           </Card>
           <RecommendationCard
             recommendation={recommendation.recommendation}
-            onSelect={() => publish(EVENT_NAMES.recommendationSelected, { v: 1, correlationId: cid, categoryId: h.categoryId, zoneId: h.zoneId })}
+            onSelect={() => publish(EVENT_NAMES.recommendationSelected, { v: 1, correlationId, categoryId: hotspot.categoryId, zoneId: hotspot.zoneId })}
           />
           <SimulationPanel apiBaseUrl={props.apiBaseUrl} initialDays={props.filters.analysisDays} showSensitivity={props.featureFlags.showSensitivity} />
         </>

@@ -49,25 +49,27 @@ export interface EventDetailMap {
   'acp.v1.recommendation-selected': RecommendationSelectedDetail;
 }
 
-const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
-const isId = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(v);
+const isPlainObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
+const isSafeIdentifier = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(value);
 
 /** Runtime validation of an incoming detail payload. Returns null when invalid. */
 export function parseEventDetail<N extends EventName>(name: N, detail: unknown): EventDetailMap[N] | null {
-  if (!isObj(detail) || detail['v'] !== 1 || !isId(detail['correlationId'])) return null;
+  if (!isPlainObject(detail) || detail['v'] !== 1 || !isSafeIdentifier(detail['correlationId'])) return null;
   switch (name) {
     case EVENT_NAMES.analysisStarted:
       return detail as unknown as EventDetailMap[N];
     case EVENT_NAMES.analysisCompleted: {
-      const r = detail['reductionKgCO2e'];
-      const ok = typeof detail['hotspotFound'] === 'boolean' && (r === null || (typeof r === 'number' && Number.isFinite(r) && r >= 0));
-      return ok ? (detail as unknown as EventDetailMap[N]) : null;
+      const reduction = detail['reductionKgCO2e'];
+      const isValid = typeof detail['hotspotFound'] === 'boolean' &&
+        (reduction === null || (typeof reduction === 'number' && Number.isFinite(reduction) && reduction >= 0));
+      return isValid ? (detail as unknown as EventDetailMap[N]) : null;
     }
     case EVENT_NAMES.analysisFailed:
       return ['TIMEOUT', 'NETWORK', 'INVALID_DATA', 'SERVER'].includes(detail['code'] as string)
         ? (detail as unknown as EventDetailMap[N]) : null;
     case EVENT_NAMES.recommendationSelected:
-      return isId(detail['categoryId']) && isId(detail['zoneId']) ? (detail as unknown as EventDetailMap[N]) : null;
+      return isSafeIdentifier(detail['categoryId']) && isSafeIdentifier(detail['zoneId'])
+        ? (detail as unknown as EventDetailMap[N]) : null;
     default:
       return null;
   }
@@ -82,25 +84,25 @@ export function listen(
   target: EventTarget,
   handler: <N extends EventName>(name: N, detail: EventDetailMap[N]) => void,
 ): () => void {
-  const cleanups = (Object.values(EVENT_NAMES) as EventName[]).map((name) => {
-    const fn = (e: Event): void => {
-      const detail = parseEventDetail(name, (e as CustomEvent).detail);
+  const removeListeners = (Object.values(EVENT_NAMES) as EventName[]).map((name) => {
+    const listener = (event: Event): void => {
+      const detail = parseEventDetail(name, (event as CustomEvent).detail);
       if (detail) handler(name, detail as never);
     };
-    target.addEventListener(name, fn);
-    return () => target.removeEventListener(name, fn);
+    target.addEventListener(name, listener);
+    return () => target.removeEventListener(name, listener);
   });
-  return () => cleanups.forEach((c) => c());
+  return () => removeListeners.forEach((removeListener) => removeListener());
 }
 
-const SEMVER_MAJOR_OK = (remote: number): boolean => remote === CONTRACT_VERSION;
+const isSameMajorVersion = (remoteContractVersion: number): boolean => remoteContractVersion === CONTRACT_VERSION;
 export const isCompatibleRemote = (remote: RemoteModule | undefined): remote is RemoteModule =>
-  !!remote && typeof remote.mount === 'function' && SEMVER_MAJOR_OK(remote.contractVersion);
+  !!remote && typeof remote.mount === 'function' && isSameMajorVersion(remote.contractVersion);
 
 export function isAllowedRemoteUrl(url: string, allowlist: readonly string[]): boolean {
   try {
-    const u = new URL(url);
-    return allowlist.includes(u.origin) && u.pathname.endsWith('.js');
+    const parsedUrl = new URL(url);
+    return allowlist.includes(parsedUrl.origin) && parsedUrl.pathname.endsWith('.js');
   } catch {
     return false;
   }

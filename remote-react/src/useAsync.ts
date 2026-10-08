@@ -9,16 +9,16 @@ export type AsyncState<T> =
 export function useAsync<T>(load: (signal: AbortSignal) => Promise<T>, deps: unknown[]): AsyncState<T> {
   const [state, setState] = useState<AsyncState<T>>({ status: 'loading' });
   useEffect(() => {
-    const ctrl = new AbortController();
+    const abortController = new AbortController();
     setState({ status: 'loading' });
-    load(ctrl.signal).then(
-      (data) => { if (!ctrl.signal.aborted) setState({ status: 'ready', data }); },
-      (e: unknown) => {
-        if (ctrl.signal.aborted) return;
-        setState({ status: 'error', code: (e as { code?: string }).code ?? 'NETWORK' });
+    load(abortController.signal).then(
+      (data) => { if (!abortController.signal.aborted) setState({ status: 'ready', data }); },
+      (error: unknown) => {
+        if (abortController.signal.aborted) return;
+        setState({ status: 'error', code: (error as { code?: string }).code ?? 'NETWORK' });
       },
     );
-    return () => ctrl.abort();
+    return () => abortController.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
   return state;

@@ -25,27 +25,49 @@ export const PARAM_LIMITS = {
   equipmentEfficiencyPct: { min: 50, max: 100 },
 } as const;
 
-const labelOf = (id: CategoryId): string => CATEGORIES.find((c) => c.id === id)?.label ?? id;
+/** Weights used by {@link calculateConfidence}; must sum to 1 so the result stays within [0, confidenceCap]. */
+const CONFIDENCE_WEIGHT_COMPLETENESS = 0.4;
+const CONFIDENCE_WEIGHT_MEASURED_SHARE = 0.3;
+const CONFIDENCE_WEIGHT_REPEATABILITY = 0.3;
+/** Confidence never reaches absolute certainty, even with perfect synthetic evidence. */
+const CONFIDENCE_CAP = 0.95;
+/** Overall dataset completeness at or above this ratio is reported as "complete" rather than "partial". */
+const COMPLETE_DATA_COMPLETENESS_THRESHOLD = 0.95;
+/** Sensitivity-band thresholds (relative spread between the low and high bound) used by {@link simulate}. */
+const SENSITIVITY_LOW_SPREAD_THRESHOLD = 0.25;
+const SENSITIVITY_MEDIUM_SPREAD_THRESHOLD = 0.5;
+/** How far the equipment-efficiency assumption is nudged up/down to compute the sensitivity bounds. */
+const SENSITIVITY_EFFICIENCY_DELTA_PCT = 10;
+const MINUTES_PER_HOUR = 60;
+
+const getCategoryLabel = (categoryId: CategoryId): string =>
+  CATEGORIES.find((category) => category.id === categoryId)?.label ?? categoryId;
+
+/** Builds the stable key used to group {@link OperationalRecord}s by category and zone. */
+const buildGroupKey = (categoryId: CategoryId, zoneId: string): string => `${categoryId}|${zoneId}`;
 
 export function validateParams(input: Partial<AnalysisParams>, energyType?: EnergyType): AnalysisParams {
-  const p: AnalysisParams = { ...DEFAULT_PARAMS, ...input };
-  for (const k of ['idleThresholdMinutes', 'analysisDays', 'equipmentEfficiencyPct'] as const) {
-    if (typeof p[k] !== 'number') throw new CalcError('MISSING_VALUE', `${k} must be a number`);
-    assertRange(k, p[k], PARAM_LIMITS[k].min, PARAM_LIMITS[k].max);
+  const mergedParams: AnalysisParams = { ...DEFAULT_PARAMS, ...input };
+  for (const paramKey of ['idleThresholdMinutes', 'analysisDays', 'equipmentEfficiencyPct'] as const) {
+    if (typeof mergedParams[paramKey] !== 'number') throw new CalcError('MISSING_VALUE', `${paramKey} must be a number`);
+    assertRange(paramKey, mergedParams[paramKey], PARAM_LIMITS[paramKey].min, PARAM_LIMITS[paramKey].max);
   }
-  if (p.emissionFactor !== undefined) {
-    if (typeof p.emissionFactor !== 'number') throw new CalcError('MISSING_VALUE', 'emissionFactor must be a number');
-    const f = EMISSION_FACTORS[energyType ?? 'electricity'];
-    assertRange('emissionFactor', p.emissionFactor, f.min, f.max);
+  if (mergedParams.emissionFactor !== undefined) {
+    if (typeof mergedParams.emissionFactor !== 'number') throw new CalcError('MISSING_VALUE', 'emissionFactor must be a number');
+    const emissionFactor = EMISSION_FACTORS[energyType ?? 'electricity'];
+    assertRange('emissionFactor', mergedParams.emissionFactor, emissionFactor.min, emissionFactor.max);
   }
-  return p;
+  return mergedParams;
 }
 
+/** Non-cryptographic djb2 hash, used only to fingerprint audit inputs for traceability (never for security). */
 export function inputsHash(value: unknown): string {
-  const s = JSON.stringify(value);
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-  return (h >>> 0).toString(16).padStart(8, '0');
+  const serialized = JSON.stringify(value);
+  let hash = 5381;
+  for (let charIndex = 0; charIndex < serialized.length; charIndex++) {
+    hash = ((hash << 5) + hash + serialized.charCodeAt(charIndex)) | 0;
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
 export function makeAudit(correlationId: string, inputs: unknown, now = new Date()): AuditRecord {
@@ -58,136 +80,182 @@ export function makeAudit(correlationId: string, inputs: unknown, now = new Date
   };
 }
 
-interface Stats {
+/** Per category+zone group accumulator built by {@link aggregateByGroup}. Internal to this module. */
+interface GroupAggregate {
   categoryId: CategoryId;
   zoneId: string;
   energyType: EnergyType;
-  total: number;
-  valid: number;
-  measured: number;
+  recordCount: number;
+  validRecordCount: number;
+  measuredRecordCount: number;
   baselineKg: number;
   eligibleIdleHours: number;
   avoidableKg: number;
   avoidedEnergy: number;
   eligibleDays: Set<number>;
-  hasEligibleCandidates: boolean;
+  hasEligibleRecords: boolean;
 }
 
-function recordKg(r: OperationalRecord, factor: number): number {
-  const f = EMISSION_FACTORS[r.energyType];
-  assertUnits(r.energyType, r.rateUnit, f);
-  return r.energyType === 'electricity'
-    ? energyEmissions(assertValue('operatingHours', r.operatingHours) * r.rate, factor)
-    : idleEmissions(r.operatingHours, r.rate, factor);
+/** Sums valid vs. total record counts across groups, used to derive a completeness ratio. */
+function sumRecordCompleteness(groups: readonly GroupAggregate[]): { totalRecords: number; validRecords: number } {
+  return groups.reduce(
+    (totals, group) => ({
+      totalRecords: totals.totalRecords + group.recordCount,
+      validRecords: totals.validRecords + group.validRecordCount,
+    }),
+    { totalRecords: 0, validRecords: 0 },
+  );
 }
 
-function collect(
-  records: OperationalRecord[], params: AnalysisParams, overrideType?: EnergyType,
-): Map<string, Stats> {
-  const firstDay = DATASET_DAYS - params.analysisDays;
-  const thr = params.idleThresholdMinutes / 60;
-  const eff = params.equipmentEfficiencyPct / 100;
-  const map = new Map<string, Stats>();
-  for (const r of records) {
-    if (r.day < firstDay) continue;
-    const key = `${r.categoryId}|${r.zoneId}`;
-    let s = map.get(key);
-    if (!s) {
-      s = {
-        categoryId: r.categoryId, zoneId: r.zoneId, energyType: r.energyType, total: 0, valid: 0, measured: 0,
-        baselineKg: 0, eligibleIdleHours: 0, avoidableKg: 0, avoidedEnergy: 0, eligibleDays: new Set(),
-        hasEligibleCandidates: false,
+function calculateRecordEmissionsKg(record: OperationalRecord, emissionFactorValue: number): number {
+  const emissionFactor = EMISSION_FACTORS[record.energyType];
+  assertUnits(record.energyType, record.rateUnit, emissionFactor);
+  return record.energyType === 'electricity'
+    ? energyEmissions(assertValue('operatingHours', record.operatingHours) * record.rate, emissionFactorValue)
+    : idleEmissions(record.operatingHours, record.rate, emissionFactorValue);
+}
+
+/**
+ * Aggregates operational records into one {@link GroupAggregate} per category+zone, restricted to the
+ * requested analysis window. Records that fail validation (missing or inconsistent values) are skipped and
+ * only lower the group's completeness; they never throw out of this function.
+ */
+function aggregateByGroup(
+  records: OperationalRecord[], params: AnalysisParams, emissionFactorOverrideType?: EnergyType,
+): Map<string, GroupAggregate> {
+  const firstIncludedDay = DATASET_DAYS - params.analysisDays;
+  const idleThresholdHours = params.idleThresholdMinutes / MINUTES_PER_HOUR;
+  const efficiencyRatio = params.equipmentEfficiencyPct / 100;
+  const groups = new Map<string, GroupAggregate>();
+
+  for (const record of records) {
+    if (record.day < firstIncludedDay) continue;
+    const groupKey = buildGroupKey(record.categoryId, record.zoneId);
+    let group = groups.get(groupKey);
+    if (!group) {
+      group = {
+        categoryId: record.categoryId, zoneId: record.zoneId, energyType: record.energyType,
+        recordCount: 0, validRecordCount: 0, measuredRecordCount: 0, baselineKg: 0, eligibleIdleHours: 0,
+        avoidableKg: 0, avoidedEnergy: 0, eligibleDays: new Set(), hasEligibleRecords: false,
       };
-      map.set(key, s);
+      groups.set(groupKey, group);
     }
-    s.total++;
-    if (r.alternativeAvailable && !r.safetyCritical) s.hasEligibleCandidates = true;
+    group.recordCount++;
+    const isSafeToReduce = record.alternativeAvailable && !record.safetyCritical;
+    if (isSafeToReduce) group.hasEligibleRecords = true;
+
     try {
-      if (r.quality === 'missing') throw new CalcError('MISSING_VALUE', 'missing');
-      const idle = assertValue('idleHours', r.idleHours);
-      const op = assertValue('operatingHours', r.operatingHours);
-      if (idle > op) throw new CalcError('OUT_OF_RANGE', 'idle exceeds operating hours');
-      const ef = overrideType === r.energyType && params.emissionFactor !== undefined
-        ? params.emissionFactor : EMISSION_FACTORS[r.energyType].value;
-      s.baselineKg += recordKg(r, ef);
-      s.valid++;
-      if (r.quality === 'measured') s.measured++;
-      if (r.alternativeAvailable && !r.safetyCritical) {
-        const over = Math.max(0, idle - thr);
-        if (over > 0) {
-          s.eligibleIdleHours += over;
-          s.avoidedEnergy += over * r.rate * eff;
-          s.avoidableKg += recordKg({ ...r, operatingHours: over }, ef) * eff;
-          s.eligibleDays.add(r.day);
+      if (record.quality === 'missing') throw new CalcError('MISSING_VALUE', 'missing');
+      const idleHours = assertValue('idleHours', record.idleHours);
+      const operatingHours = assertValue('operatingHours', record.operatingHours);
+      if (idleHours > operatingHours) throw new CalcError('OUT_OF_RANGE', 'idle exceeds operating hours');
+
+      const emissionFactorValue = emissionFactorOverrideType === record.energyType && params.emissionFactor !== undefined
+        ? params.emissionFactor : EMISSION_FACTORS[record.energyType].value;
+      group.baselineKg += calculateRecordEmissionsKg(record, emissionFactorValue);
+      group.validRecordCount++;
+      if (record.quality === 'measured') group.measuredRecordCount++;
+
+      if (isSafeToReduce) {
+        const eligibleOverageHours = Math.max(0, idleHours - idleThresholdHours);
+        if (eligibleOverageHours > 0) {
+          group.eligibleIdleHours += eligibleOverageHours;
+          group.avoidedEnergy += eligibleOverageHours * record.rate * efficiencyRatio;
+          group.avoidableKg += calculateRecordEmissionsKg({ ...record, operatingHours: eligibleOverageHours }, emissionFactorValue) * efficiencyRatio;
+          group.eligibleDays.add(record.day);
         }
       }
-    } catch (e) {
-      if (!(e instanceof CalcError)) throw e; // invalid record is excluded and lowers completeness
+    } catch (error) {
+      // An invalid record is excluded from the baseline and lowers completeness; any other error is unexpected and rethrown.
+      if (!(error instanceof CalcError)) throw error;
     }
   }
-  return map;
+  return groups;
+}
+
+/** Evidence-strength score in [0, {@link CONFIDENCE_CAP}]; higher means the pattern is better supported by data, not that it is certain. */
+function calculateConfidence(completeness: number, measuredShare: number, repeatability: number): number {
+  return round2(Math.min(
+    CONFIDENCE_CAP,
+    CONFIDENCE_WEIGHT_COMPLETENESS * completeness +
+      CONFIDENCE_WEIGHT_MEASURED_SHARE * measuredShare +
+      CONFIDENCE_WEIGHT_REPEATABILITY * repeatability,
+  ));
+}
+
+/** Converts one {@link GroupAggregate} into the public {@link CandidateGroup} shape (selection fields left blank). */
+function toCandidateGroup(group: GroupAggregate, totalEmissionsKg: number, analysisDays: number): CandidateGroup {
+  const completeness = group.recordCount === 0 ? 0 : group.validRecordCount / group.recordCount;
+  const measuredShare = group.validRecordCount === 0 ? 0 : group.measuredRecordCount / group.validRecordCount;
+  const repeatability = group.eligibleDays.size / analysisDays;
+  return {
+    categoryId: group.categoryId, label: getCategoryLabel(group.categoryId), zoneId: group.zoneId,
+    kgCO2e: roundKg(group.baselineKg), eligibleIdleHours: round1(group.eligibleIdleHours),
+    avoidableKgCO2e: roundKg(group.avoidableKg),
+    contributionPct: totalEmissionsKg === 0 ? 0 : round1((group.baselineKg / totalEmissionsKg) * 100),
+    confidence: calculateConfidence(completeness, measuredShare, repeatability),
+    confidenceBreakdown: {
+      completeness: round2(completeness), measuredShare: round2(measuredShare), repeatability: round2(repeatability),
+    },
+    safetyEligible: group.hasEligibleRecords && group.avoidableKg > 0,
+    selected: false,
+    reason: '',
+  };
+}
+
+/** Explains, in plain language, why a candidate was or was not selected as the hotspot. */
+function explainCandidateOutcome(candidate: CandidateGroup, isSelected: boolean): string {
+  if (isSelected) return 'Largest estimated avoidable emissions among safety-eligible groups that meet the confidence threshold.';
+  if (!candidate.safetyEligible) return 'Not eligible: no safe lower-emission alternative, or the function is safety-critical or not reducible.';
+  if (candidate.confidence < CONFIDENCE_THRESHOLD) return 'Evidence strength is below the confidence threshold.';
+  return 'Eligible, but its estimated avoidable emissions are lower than the selected group.';
 }
 
 export function analyze(records: OperationalRecord[], correlationId = 'n/a', now = new Date()): AnalysisResponse {
   const params = DEFAULT_PARAMS;
-  const stats = [...collect(records, params).values()];
-  const totalKg = stats.reduce((a, s) => a + s.baselineKg, 0);
-  const totals = stats.reduce((a, s) => ({ t: a.t + s.total, v: a.v + s.valid }), { t: 0, v: 0 });
-  const overallCompleteness = totals.t === 0 ? 0 : totals.v / totals.t;
+  const groupStats = [...aggregateByGroup(records, params).values()];
+  const totalEmissionsKg = groupStats.reduce((sum, group) => sum + group.baselineKg, 0);
+  const { totalRecords, validRecords } = sumRecordCompleteness(groupStats);
+  const overallCompleteness = totalRecords === 0 ? 0 : validRecords / totalRecords;
 
-  const candidates: CandidateGroup[] = stats.map((s) => {
-    const completeness = s.total === 0 ? 0 : s.valid / s.total;
-    const measuredShare = s.valid === 0 ? 0 : s.measured / s.valid;
-    const repeatability = s.eligibleDays.size / params.analysisDays;
-    const confidence = round2(Math.min(0.95, 0.4 * completeness + 0.3 * measuredShare + 0.3 * repeatability));
-    const safetyEligible = s.hasEligibleCandidates && s.avoidableKg > 0;
-    return {
-      categoryId: s.categoryId, label: labelOf(s.categoryId), zoneId: s.zoneId,
-      kgCO2e: roundKg(s.baselineKg), eligibleIdleHours: round1(s.eligibleIdleHours),
-      avoidableKgCO2e: roundKg(s.avoidableKg),
-      contributionPct: totalKg === 0 ? 0 : round1((s.baselineKg / totalKg) * 100),
-      confidence,
-      confidenceBreakdown: {
-        completeness: round2(completeness), measuredShare: round2(measuredShare), repeatability: round2(repeatability),
-      },
-      safetyEligible, selected: false, reason: '',
-    };
-  });
+  const candidates: CandidateGroup[] = groupStats.map((group) => toCandidateGroup(group, totalEmissionsKg, params.analysisDays));
 
-  const rawAvoidable = new Map(stats.map((s) => [`${s.categoryId}|${s.zoneId}`, s.avoidableKg]));
-  const eligible = candidates
-    .filter((c) => c.safetyEligible && c.confidence >= CONFIDENCE_THRESHOLD)
-    .sort((a, b) => (rawAvoidable.get(`${b.categoryId}|${b.zoneId}`) ?? 0) - (rawAvoidable.get(`${a.categoryId}|${a.zoneId}`) ?? 0));
-  const winner = overallCompleteness >= MIN_COMPLETENESS ? eligible[0] : undefined;
+  const avoidableKgByGroupKey = new Map(groupStats.map((group) => [buildGroupKey(group.categoryId, group.zoneId), group.avoidableKg]));
+  const eligibleCandidates = candidates
+    .filter((candidate) => candidate.safetyEligible && candidate.confidence >= CONFIDENCE_THRESHOLD)
+    .sort((candidateA, candidateB) => {
+      const avoidableA = avoidableKgByGroupKey.get(buildGroupKey(candidateA.categoryId, candidateA.zoneId)) ?? 0;
+      const avoidableB = avoidableKgByGroupKey.get(buildGroupKey(candidateB.categoryId, candidateB.zoneId)) ?? 0;
+      return avoidableB - avoidableA;
+    });
+  const selectedCandidate = overallCompleteness >= MIN_COMPLETENESS ? eligibleCandidates[0] : undefined;
 
-  for (const c of candidates) {
-    if (c === winner) {
-      c.selected = true;
-      c.reason = 'Largest estimated avoidable emissions among safety-eligible groups that meet the confidence threshold.';
-    } else if (!c.safetyEligible) {
-      c.reason = 'Not eligible: no safe lower-emission alternative, or the function is safety-critical or not reducible.';
-    } else if (c.confidence < CONFIDENCE_THRESHOLD) {
-      c.reason = 'Evidence strength is below the confidence threshold.';
-    } else {
-      c.reason = 'Eligible, but its estimated avoidable emissions are lower than the selected group.';
-    }
+  for (const candidate of candidates) {
+    const isSelected = candidate === selectedCandidate;
+    candidate.selected = isSelected;
+    candidate.reason = explainCandidateOutcome(candidate, isSelected);
   }
-  candidates.sort((a, b) => b.avoidableKgCO2e - a.avoidableKgCO2e);
+  candidates.sort((candidateA, candidateB) => candidateB.avoidableKgCO2e - candidateA.avoidableKgCO2e);
 
   const audit = makeAudit(correlationId, { params, datasetId: DATASET_ID }, now);
   let hotspot: Hotspot | null = null;
-  if (winner) {
-    const s = stats.find((x) => x.categoryId === winner.categoryId && x.zoneId === winner.zoneId)!;
-    const idleShare = round1((s.eligibleIdleHours / Math.max(1, s.valid)) * 60);
+  if (selectedCandidate) {
+    const winningGroupStats = groupStats.find(
+      (group) => group.categoryId === selectedCandidate.categoryId && group.zoneId === selectedCandidate.zoneId,
+    )!;
+    const avgEligibleIdleMinutesPerRecord = round1(
+      (winningGroupStats.eligibleIdleHours / Math.max(1, winningGroupStats.validRecordCount)) * MINUTES_PER_HOUR,
+    );
     hotspot = {
-      ...winner,
+      ...selectedCandidate,
       baselinePeriod: { days: params.analysisDays, label: `Last ${params.analysisDays} days of the synthetic month` },
       supportingPattern:
-        `Eligible idle time beyond ${params.idleThresholdMinutes} minutes occurs on ${s.eligibleDays.size} of ` +
-        `${params.analysisDays} days (about ${idleShare} minutes per record), where a lower-emission alternative is available.`,
+        `Eligible idle time beyond ${params.idleThresholdMinutes} minutes occurs on ${winningGroupStats.eligibleDays.size} of ` +
+        `${params.analysisDays} days (about ${avgEligibleIdleMinutesPerRecord} minutes per record), where a lower-emission alternative is available.`,
       selectionReason:
-        `${winner.label} in ${winner.zoneId} has the largest estimated avoidable emissions (${winner.avoidableKgCO2e} kgCO2e) ` +
-        `among eligible groups, with confidence ${winner.confidence} (threshold ${CONFIDENCE_THRESHOLD}).`,
+        `${selectedCandidate.label} in ${selectedCandidate.zoneId} has the largest estimated avoidable emissions ` +
+        `(${selectedCandidate.avoidableKgCO2e} kgCO2e) among eligible groups, with confidence ${selectedCandidate.confidence} ` +
+        `(threshold ${CONFIDENCE_THRESHOLD}).`,
       uncertainties: [
         'Records with missing measurements are excluded, so totals may be understated.',
         'Idle time is derived from synthetic logs and may include periods with an operational need not captured in the data.',
@@ -204,21 +272,21 @@ export function analyze(records: OperationalRecord[], correlationId = 'n/a', now
 
 export function overview(records: OperationalRecord[], periodDays = DATASET_DAYS): OverviewResponse {
   const days = assertRange('periodDays', periodDays, PARAM_LIMITS.analysisDays.min, PARAM_LIMITS.analysisDays.max);
-  const stats = [...collect(records, { ...DEFAULT_PARAMS, analysisDays: days }).values()];
-  const byCat = new Map<CategoryId, number>();
-  stats.forEach((s) => byCat.set(s.categoryId, (byCat.get(s.categoryId) ?? 0) + s.baselineKg));
-  const total = [...byCat.values()].reduce((a, b) => a + b, 0);
-  const categories: CategorySummary[] = CATEGORIES.map((c) => ({
-    categoryId: c.id, label: c.label, kgCO2e: roundKg(byCat.get(c.id) ?? 0),
-    sharePct: total === 0 ? 0 : round1(((byCat.get(c.id) ?? 0) / total) * 100),
+  const groupStats = [...aggregateByGroup(records, { ...DEFAULT_PARAMS, analysisDays: days }).values()];
+  const emissionsByCategoryId = new Map<CategoryId, number>();
+  groupStats.forEach((group) => emissionsByCategoryId.set(group.categoryId, (emissionsByCategoryId.get(group.categoryId) ?? 0) + group.baselineKg));
+  const totalEmissionsKg = [...emissionsByCategoryId.values()].reduce((sum, value) => sum + value, 0);
+  const categories: CategorySummary[] = CATEGORIES.map((category) => ({
+    categoryId: category.id, label: category.label, kgCO2e: roundKg(emissionsByCategoryId.get(category.id) ?? 0),
+    sharePct: totalEmissionsKg === 0 ? 0 : round1(((emissionsByCategoryId.get(category.id) ?? 0) / totalEmissionsKg) * 100),
   }));
-  const t = stats.reduce((a, s) => ({ t: a.t + s.total, v: a.v + s.valid }), { t: 0, v: 0 });
-  const completeness = t.t === 0 ? 0 : t.v / t.t;
+  const { totalRecords, validRecords } = sumRecordCompleteness(groupStats);
+  const completeness = totalRecords === 0 ? 0 : validRecords / totalRecords;
   return {
-    meta: AIRPORT_META, periodDays: days, totalKgCO2e: roundKg(total), categories,
+    meta: AIRPORT_META, periodDays: days, totalKgCO2e: roundKg(totalEmissionsKg), categories,
     quality: {
       completenessPct: round1(completeness * 100),
-      status: completeness >= 0.95 ? 'complete' : completeness >= MIN_COMPLETENESS ? 'partial' : 'insufficient',
+      status: completeness >= COMPLETE_DATA_COMPLETENESS_THRESHOLD ? 'complete' : completeness >= MIN_COMPLETENESS ? 'partial' : 'insufficient',
     },
     valueKind: 'derived',
     syntheticNotice: 'Synthetic data: all values are fictional and for demonstration only.',
@@ -229,41 +297,51 @@ export function simulate(
   records: OperationalRecord[], categoryId: CategoryId, zoneId: string, input: Partial<AnalysisParams>,
   correlationId = 'n/a', now = new Date(),
 ): SimulationResult {
-  const energyType = records.find((r) => r.categoryId === categoryId && r.zoneId === zoneId)?.energyType;
+  const energyType = records.find((record) => record.categoryId === categoryId && record.zoneId === zoneId)?.energyType;
   if (!energyType) throw new CalcError('MISSING_VALUE', 'hotspot group has no records');
   const params = validateParams(input, energyType);
-  const key = `${categoryId}|${zoneId}`;
-  const run = (p: AnalysisParams) => collect(records, p, energyType).get(key);
+  const groupKey = buildGroupKey(categoryId, zoneId);
+  const runScenario = (scenarioParams: AnalysisParams) => aggregateByGroup(records, scenarioParams, energyType).get(groupKey);
 
-  const base = run(params);
-  if (!base) throw new CalcError('MISSING_VALUE', 'no data in the selected period');
-  const baseline = base.baselineKg;
-  const reduction = base.avoidableKg;
-  const simulated = baseline - reduction;
-  avoidableEmissions(baseline, simulated);
+  const baselineGroupStats = runScenario(params);
+  if (!baselineGroupStats) throw new CalcError('MISSING_VALUE', 'no data in the selected period');
+  const baselineEmissionsKg = baselineGroupStats.baselineKg;
+  const reductionKg = baselineGroupStats.avoidableKg;
+  const simulatedEmissionsKg = baselineEmissionsKg - reductionKg;
+  avoidableEmissions(baselineEmissionsKg, simulatedEmissionsKg);
 
-  const f = EMISSION_FACTORS[energyType];
-  const low = run({ ...params, emissionFactor: f.min, equipmentEfficiencyPct: Math.max(50, params.equipmentEfficiencyPct - 10) })?.avoidableKg ?? 0;
-  const high = run({ ...params, emissionFactor: f.max, equipmentEfficiencyPct: Math.min(100, params.equipmentEfficiencyPct + 10) })?.avoidableKg ?? 0;
-  const spread = high === 0 ? 0 : (high - low) / ((high + low) / 2);
-  const unit = energyType === 'electricity' ? 'kWh' : 'L';
-  const ef = params.emissionFactor ?? f.value;
+  const emissionFactor = EMISSION_FACTORS[energyType];
+  const lowBoundAvoidableKg = runScenario({
+    ...params, emissionFactor: emissionFactor.min,
+    equipmentEfficiencyPct: Math.max(50, params.equipmentEfficiencyPct - SENSITIVITY_EFFICIENCY_DELTA_PCT),
+  })?.avoidableKg ?? 0;
+  const highBoundAvoidableKg = runScenario({
+    ...params, emissionFactor: emissionFactor.max,
+    equipmentEfficiencyPct: Math.min(100, params.equipmentEfficiencyPct + SENSITIVITY_EFFICIENCY_DELTA_PCT),
+  })?.avoidableKg ?? 0;
+  const sensitivitySpread = highBoundAvoidableKg === 0
+    ? 0 : (highBoundAvoidableKg - lowBoundAvoidableKg) / ((highBoundAvoidableKg + lowBoundAvoidableKg) / 2);
+  const energyUnit = energyType === 'electricity' ? 'kWh' : 'L';
+  const appliedEmissionFactor = params.emissionFactor ?? emissionFactor.value;
   const audit = makeAudit(correlationId, { categoryId, zoneId, params }, now);
   return {
     params,
-    baselineKgCO2e: roundKg(baseline),
-    simulatedKgCO2e: roundKg(baseline) - roundKg(reduction),
-    reductionKgCO2e: roundKg(reduction),
-    reductionPct: round1(reductionPercentage(reduction, baseline)),
-    avoidedEnergy: { amount: round1(base.avoidedEnergy), unit },
-    estimatedCostSaving: { amount: roundKg(base.avoidedEnergy * UNIT_COST[energyType]), currency: 'SYN-USD' },
-    sensitivity: { lowKgCO2e: roundKg(low), highKgCO2e: roundKg(high), level: spread < 0.25 ? 'low' : spread < 0.5 ? 'medium' : 'high' },
+    baselineKgCO2e: roundKg(baselineEmissionsKg),
+    simulatedKgCO2e: roundKg(baselineEmissionsKg) - roundKg(reductionKg),
+    reductionKgCO2e: roundKg(reductionKg),
+    reductionPct: round1(reductionPercentage(reductionKg, baselineEmissionsKg)),
+    avoidedEnergy: { amount: round1(baselineGroupStats.avoidedEnergy), unit: energyUnit },
+    estimatedCostSaving: { amount: roundKg(baselineGroupStats.avoidedEnergy * UNIT_COST[energyType]), currency: 'SYN-USD' },
+    sensitivity: {
+      lowKgCO2e: roundKg(lowBoundAvoidableKg), highKgCO2e: roundKg(highBoundAvoidableKg),
+      level: sensitivitySpread < SENSITIVITY_LOW_SPREAD_THRESHOLD ? 'low' : sensitivitySpread < SENSITIVITY_MEDIUM_SPREAD_THRESHOLD ? 'medium' : 'high',
+    },
     valueKinds: { baseline: 'derived', simulated: 'simulated', reduction: 'simulated' },
     calculationSummary: [
-      `Baseline = sum over valid records of operating hours × rate × emission factor (${ef} ${f.unit}) = ${roundKg(baseline)} kgCO2e (derived).`,
-      `Eligible idle time = idle hours beyond ${params.idleThresholdMinutes} min on records with a safe lower-emission alternative = ${round1(base.eligibleIdleHours)} h.`,
-      `Simulated reduction = eligible idle energy × ${params.equipmentEfficiencyPct}% equipment efficiency × factor = ${roundKg(reduction)} kgCO2e (estimate).`,
-      `Simulated post-intervention = baseline − reduction = ${roundKg(simulated)} kgCO2e (estimate).`,
+      `Baseline = sum over valid records of operating hours × rate × emission factor (${appliedEmissionFactor} ${emissionFactor.unit}) = ${roundKg(baselineEmissionsKg)} kgCO2e (derived).`,
+      `Eligible idle time = idle hours beyond ${params.idleThresholdMinutes} min on records with a safe lower-emission alternative = ${round1(baselineGroupStats.eligibleIdleHours)} h.`,
+      `Simulated reduction = eligible idle energy × ${params.equipmentEfficiencyPct}% equipment efficiency × factor = ${roundKg(reductionKg)} kgCO2e (estimate).`,
+      `Simulated post-intervention = baseline − reduction = ${roundKg(simulatedEmissionsKg)} kgCO2e (estimate).`,
       'Rounded to whole kgCO2e and one decimal for percentages and energy.',
     ],
     disclaimer: ADVISORY_DISCLAIMER,
@@ -272,15 +350,15 @@ export function simulate(
 }
 
 export function recommend(analysis: AnalysisResponse, sim: SimulationResult | null): RecommendationResponse {
-  const h = analysis.hotspot;
-  if (!h || !sim) {
+  const hotspot = analysis.hotspot;
+  if (!hotspot || !sim) {
     return { recommendation: null, noRecommendationMessage: NO_SAFE_RECOMMENDATION, audit: analysis.audit };
   }
   const recommendation: Recommendation = {
     action:
-      `Reduce unnecessary auxiliary-power operation at ${h.zoneId} stands during eligible idle periods (longer than ` +
+      `Reduce unnecessary auxiliary-power operation at ${hotspot.zoneId} stands during eligible idle periods (longer than ` +
       `${sim.params.idleThresholdMinutes} minutes) by using available fixed electrical ground power, after authorised operational review.`,
-    rationale: h.supportingPattern,
+    rationale: hotspot.supportingPattern,
     expectedReductionKgCO2e: sim.reductionKgCO2e,
     effort: 'Low',
     costCategory: 'Low: procedural review and briefing; no new equipment assumed',

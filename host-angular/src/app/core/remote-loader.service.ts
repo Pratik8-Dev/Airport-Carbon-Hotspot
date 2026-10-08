@@ -21,47 +21,47 @@ const COOLDOWN_MS = 30_000;
 
 @Injectable({ providedIn: 'root' })
 export class RemoteLoaderService {
-  private readonly cfg = inject(APP_CONFIG);
+  private readonly appConfig = inject(APP_CONFIG);
   private readonly importer = inject(REMOTE_IMPORTER);
   private cached: Promise<RemoteModule> | null = null; // avoids duplicate network loads
-  private failures = 0;
-  private openUntil = 0;
+  private consecutiveFailures = 0;
+  private circuitOpenUntil = 0;
 
   load(now: number = Date.now()): Promise<RemoteModule> {
-    if (now < this.openUntil) return Promise.reject(new RemoteLoadError('CIRCUIT_OPEN'));
-    if (!isAllowedRemoteUrl(this.cfg.remoteEntryUrl, this.cfg.remoteAllowlist)) {
+    if (now < this.circuitOpenUntil) return Promise.reject(new RemoteLoadError('CIRCUIT_OPEN'));
+    if (!isAllowedRemoteUrl(this.appConfig.remoteEntryUrl, this.appConfig.remoteAllowlist)) {
       return Promise.reject(new RemoteLoadError('BLOCKED_URL'));
     }
-    this.cached ??= this.loadOnce().catch((e: unknown) => {
+    this.cached ??= this.loadOnce().catch((error: unknown) => {
       this.cached = null;
-      this.failures++;
-      if (this.failures >= FAILURE_THRESHOLD) this.openUntil = Date.now() + COOLDOWN_MS;
-      throw e;
+      this.consecutiveFailures++;
+      if (this.consecutiveFailures >= FAILURE_THRESHOLD) this.circuitOpenUntil = Date.now() + COOLDOWN_MS;
+      throw error;
     });
     return this.cached;
   }
 
   /** Lets a user-initiated retry bypass the cool-down. */
   reset(): void {
-    this.failures = 0;
-    this.openUntil = 0;
+    this.consecutiveFailures = 0;
+    this.circuitOpenUntil = 0;
     this.cached = null;
   }
 
   private async loadOnce(): Promise<RemoteModule> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new RemoteLoadError('TIMEOUT')), this.cfg.remoteTimeoutMs);
+      timeoutHandle = setTimeout(() => reject(new RemoteLoadError('TIMEOUT')), this.appConfig.remoteTimeoutMs);
     });
     try {
-      const mod = (await Promise.race([this.importer(this.cfg.remoteEntryUrl), timeout])) as RemoteModule;
-      if (!isCompatibleRemote(mod)) throw new RemoteLoadError('INCOMPATIBLE');
-      this.failures = 0;
-      return mod;
-    } catch (e) {
-      throw e instanceof RemoteLoadError ? e : new RemoteLoadError('LOAD_FAILED');
+      const remoteModule = (await Promise.race([this.importer(this.appConfig.remoteEntryUrl), timeout])) as RemoteModule;
+      if (!isCompatibleRemote(remoteModule)) throw new RemoteLoadError('INCOMPATIBLE');
+      this.consecutiveFailures = 0;
+      return remoteModule;
+    } catch (error) {
+      throw error instanceof RemoteLoadError ? error : new RemoteLoadError('LOAD_FAILED');
     } finally {
-      clearTimeout(timer);
+      clearTimeout(timeoutHandle);
     }
   }
 }

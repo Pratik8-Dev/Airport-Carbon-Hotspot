@@ -10,23 +10,23 @@ export class CalcError extends Error {
 }
 
 // Whole kg: avoids false precision for synthetic inputs.
-export const roundKg = (v: number): number => Math.round(v);
+export const roundKg = (value: number): number => Math.round(value);
 // One decimal for percentages and energy quantities.
-export const round1 = (v: number): number => Math.round(v * 10) / 10;
-export const round2 = (v: number): number => Math.round(v * 100) / 100;
+export const round1 = (value: number): number => Math.round(value * 10) / 10;
+export const round2 = (value: number): number => Math.round(value * 100) / 100;
 
-export function assertValue(name: string, v: number | null | undefined): number {
-  if (v === null || v === undefined || Number.isNaN(v)) throw new CalcError('MISSING_VALUE', `${name} is missing`);
-  if (!Number.isFinite(v)) throw new CalcError('OUT_OF_RANGE', `${name} must be finite`);
-  if (v < 0) throw new CalcError('NEGATIVE_VALUE', `${name} must not be negative`);
-  return v;
+export function assertValue(name: string, value: number | null | undefined): number {
+  if (value === null || value === undefined || Number.isNaN(value)) throw new CalcError('MISSING_VALUE', `${name} is missing`);
+  if (!Number.isFinite(value)) throw new CalcError('OUT_OF_RANGE', `${name} must be finite`);
+  if (value < 0) throw new CalcError('NEGATIVE_VALUE', `${name} must not be negative`);
+  return value;
 }
 
-export function assertRange(name: string, v: number, min: number, max: number): number {
-  if (!Number.isFinite(v) || v < min || v > max) {
+export function assertRange(name: string, value: number, min: number, max: number): number {
+  if (!Number.isFinite(value) || value < min || value > max) {
     throw new CalcError('OUT_OF_RANGE', `${name} must be between ${min} and ${max}`);
   }
-  return v;
+  return value;
 }
 
 const EXPECTED_UNITS: Record<EnergyType, { rate: RateUnit; factor: FactorUnit }> = {

@@ -11,11 +11,11 @@ export class NotificationService {
 
   /** Only user-safe, generic text is accepted here: callers must never pass raw error details. */
   push(kind: Notice['kind'], text: string): void {
-    this.notices.update((n) => [...n.slice(-2), { id: this.nextId++, kind, text }]);
+    this.notices.update((existingNotices) => [...existingNotices.slice(-2), { id: this.nextId++, kind, text }]);
     void this.announcer.announce(text, kind === 'error' ? 'assertive' : 'polite');
   }
 
   dismiss(id: number): void {
-    this.notices.update((n) => n.filter((x) => x.id !== id));
+    this.notices.update((existingNotices) => existingNotices.filter((notice) => notice.id !== id));
   }
 }

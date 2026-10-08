@@ -44,8 +44,8 @@ export class ReactHostComponent {
 
   protected readonly state = signal<'loading' | 'ready' | 'failed'>('loading');
 
-  private readonly container = viewChild.required<ElementRef<HTMLElement>>('container');
-  private readonly cfg = inject(APP_CONFIG);
+  private readonly containerRef = viewChild.required<ElementRef<HTMLElement>>('container');
+  private readonly appConfig = inject(APP_CONFIG);
   private readonly loader = inject(RemoteLoaderService);
   private readonly theme = inject(ThemeService);
   private readonly auth = inject(AuthService);
@@ -57,13 +57,13 @@ export class ReactHostComponent {
   private starting = false;
 
   // Only non-sensitive, serialisable values are passed. No tokens or user identity.
-  private readonly props = computed<MountProps>(() => ({
+  private readonly mountProps = computed<MountProps>(() => ({
     contractVersion: CONTRACT_VERSION,
     view: this.view(),
-    apiBaseUrl: this.cfg.apiBaseUrl,
-    airportContext: this.cfg.airportContext,
+    apiBaseUrl: this.appConfig.apiBaseUrl,
+    airportContext: this.appConfig.airportContext,
     filters: { analysisDays: 30 },
-    featureFlags: this.cfg.featureFlags,
+    featureFlags: this.appConfig.featureFlags,
     theme: this.theme.theme(),
     auth: { state: 'authenticated', roles: [...this.auth.roles()] },
   }));
@@ -72,8 +72,8 @@ export class ReactHostComponent {
     inject(DestroyRef).onDestroy(() => this.teardown());
     afterNextRender(() => void this.start());
     effect(() => {
-      const p = this.props();
-      this.handle?.update(p);
+      const nextProps = this.mountProps();
+      this.handle?.update(nextProps);
     });
   }
 
@@ -89,9 +89,9 @@ export class ReactHostComponent {
     try {
       const remote = await this.loader.load();
       if (this.destroyed) return;
-      const el = this.container().nativeElement;
-      this.stopListening = listen(el, (name, detail) => this.onRemoteEvent(name, detail.correlationId));
-      this.handle = remote.mount(el, this.props());
+      const containerElement = this.containerRef().nativeElement;
+      this.stopListening = listen(containerElement, (name, detail) => this.onRemoteEvent(name, detail.correlationId));
+      this.handle = remote.mount(containerElement, this.mountProps());
       this.state.set('ready');
     } catch {
       if (!this.destroyed) this.state.set('failed');

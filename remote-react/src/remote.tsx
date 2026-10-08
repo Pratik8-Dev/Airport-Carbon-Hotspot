@@ -14,10 +14,10 @@ export function mount(container: HTMLElement, props: MountProps): RemoteHandle {
     return existing;
   }
   let root: Root | null = createRoot(container);
-  const render = (p: MountProps): void => root?.render(<App props={p} eventTarget={container} />);
+  const render = (nextProps: MountProps): void => root?.render(<App props={nextProps} eventTarget={container} />);
   render(props);
   const handle: RemoteHandle = {
-    update: (p) => render(p),
+    update: (nextProps) => render(nextProps),
     unmount: () => {
       if (!root) return;
       root.unmount();

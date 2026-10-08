@@ -24,14 +24,14 @@ describe('guards', () => {
     const router = TestBed.inject(Router);
     expect(TestBed.runInInjectionContext(() => roleGuard(route({ role: 'analyst' }), state))).toBe(true);
     auth.setRolesForDemo(['viewer']);
-    const r = TestBed.runInInjectionContext(() => roleGuard(route({ role: 'analyst' }), state));
-    expect(router.serializeUrl(r as ReturnType<Router['createUrlTree']>)).toBe('/access-denied');
+    const guardResult = TestBed.runInInjectionContext(() => roleGuard(route({ role: 'analyst' }), state));
+    expect(router.serializeUrl(guardResult as ReturnType<Router['createUrlTree']>)).toBe('/access-denied');
   });
 
   it('redirects unauthenticated users to /unavailable', () => {
     TestBed.inject(AuthService).setRolesForDemo([]);
-    const r = TestBed.runInInjectionContext(() => authGuard(route({}), state));
-    expect(TestBed.inject(Router).serializeUrl(r as ReturnType<Router['createUrlTree']>)).toBe('/unavailable');
+    const guardResult = TestBed.runInInjectionContext(() => authGuard(route({}), state));
+    expect(TestBed.inject(Router).serializeUrl(guardResult as ReturnType<Router['createUrlTree']>)).toBe('/unavailable');
   });
 
   it('defines the required top-level routes', () => {

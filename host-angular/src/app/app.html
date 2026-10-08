@@ -4,7 +4,7 @@
   <div class="brand">
     <strong>Airport Carbon Hotspot</strong>
     <span class="badge">Synthetic data</span>
-    <span class="badge env" [attr.data-env]="cfg.environmentName">Environment: {{ cfg.environmentName }}</span>
+    <span class="badge env" [attr.data-env]="appConfig.environmentName">Environment: {{ appConfig.environmentName }}</span>
     <span class="badge" [class.bad]="apiHealthy() === false">
       Data service: {{ apiHealthy() === null ? 'checking' : apiHealthy() ? 'available' : 'unavailable' }}
     </span>

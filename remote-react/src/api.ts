@@ -14,72 +14,78 @@ export class ApiFailure extends Error {
 
 export const newCorrelationId = (): string => crypto.randomUUID();
 
-const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
-const num = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v);
+const isPlainObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
+const isFiniteNumber = (value: unknown): boolean => typeof value === 'number' && Number.isFinite(value);
 
 // Lightweight runtime guards: the remote never trusts the network shape.
 export const guards = {
-  overview: (v: unknown): v is OverviewResponse =>
-    isObj(v) && num(v['totalKgCO2e']) && Array.isArray(v['categories']) && isObj(v['quality']) && isObj(v['meta']),
-  analysis: (v: unknown): v is AnalysisResponse =>
-    isObj(v) && Array.isArray(v['candidates']) && 'hotspot' in v && isObj(v['audit']),
-  recommendation: (v: unknown): v is RecommendationResponse => isObj(v) && 'recommendation' in v && isObj(v['audit']),
-  simulation: (v: unknown): v is SimulationResult =>
-    isObj(v) && num(v['baselineKgCO2e']) && num(v['simulatedKgCO2e']) && num(v['reductionKgCO2e']) && num(v['reductionPct']),
-  methodology: (v: unknown): v is MethodologyResponse => isObj(v) && Array.isArray(v['formulas']) && Array.isArray(v['fields']),
+  overview: (value: unknown): value is OverviewResponse =>
+    isPlainObject(value) && isFiniteNumber(value['totalKgCO2e']) && Array.isArray(value['categories']) &&
+    isPlainObject(value['quality']) && isPlainObject(value['meta']),
+  analysis: (value: unknown): value is AnalysisResponse =>
+    isPlainObject(value) && Array.isArray(value['candidates']) && 'hotspot' in value && isPlainObject(value['audit']),
+  recommendation: (value: unknown): value is RecommendationResponse =>
+    isPlainObject(value) && 'recommendation' in value && isPlainObject(value['audit']),
+  simulation: (value: unknown): value is SimulationResult =>
+    isPlainObject(value) && isFiniteNumber(value['baselineKgCO2e']) && isFiniteNumber(value['simulatedKgCO2e']) &&
+    isFiniteNumber(value['reductionKgCO2e']) && isFiniteNumber(value['reductionPct']),
+  methodology: (value: unknown): value is MethodologyResponse =>
+    isPlainObject(value) && Array.isArray(value['formulas']) && Array.isArray(value['fields']),
 };
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 8000;
 
 interface RequestOptions<T> {
   method?: 'GET' | 'POST';
   body?: unknown;
   signal?: AbortSignal;
-  guard: (v: unknown) => v is T;
+  guard: (value: unknown) => value is T;
   correlationId?: string;
   timeoutMs?: number;
 }
 
-export async function request<T>(baseUrl: string, path: string, opts: RequestOptions<T>): Promise<T> {
-  const cid = opts.correlationId ?? newCorrelationId();
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort('timeout'), opts.timeoutMs ?? 8000);
-  const onAbort = (): void => ctrl.abort('caller');
-  opts.signal?.addEventListener('abort', onAbort);
+export async function request<T>(baseUrl: string, path: string, options: RequestOptions<T>): Promise<T> {
+  const correlationId = options.correlationId ?? newCorrelationId();
+  const timeoutController = new AbortController();
+  const timeoutHandle = setTimeout(() => timeoutController.abort('timeout'), options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+  const abortOnCallerSignal = (): void => timeoutController.abort('caller');
+  options.signal?.addEventListener('abort', abortOnCallerSignal);
   try {
-    const headers: Record<string, string> = { 'X-Correlation-ID': cid, Accept: 'application/json' };
-    if (opts.method === 'POST') {
+    const headers: Record<string, string> = { 'X-Correlation-ID': correlationId, Accept: 'application/json' };
+    if (options.method === 'POST') {
       headers['Content-Type'] = 'application/json';
       headers['X-Requested-With'] = 'acp';
     }
-    const res = await fetch(`${baseUrl}${path}`, {
-      method: opts.method ?? 'GET', headers, credentials: 'include', signal: ctrl.signal,
-      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: options.method ?? 'GET', headers, credentials: 'include', signal: timeoutController.signal,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
-    if (!res.ok) throw new ApiFailure(res.status >= 500 ? 'SERVER' : 'INVALID_DATA', cid);
-    const json: unknown = await res.json();
-    if (!opts.guard(json)) throw new ApiFailure('INVALID_DATA', cid);
-    return json;
-  } catch (e) {
-    if (e instanceof ApiFailure) throw e;
-    if (opts.signal?.aborted) throw e;
-    if (ctrl.signal.aborted) throw new ApiFailure('TIMEOUT', cid);
-    throw new ApiFailure(e instanceof SyntaxError ? 'INVALID_DATA' : 'NETWORK', cid);
+    if (!response.ok) throw new ApiFailure(response.status >= 500 ? 'SERVER' : 'INVALID_DATA', correlationId);
+    const payload: unknown = await response.json();
+    if (!options.guard(payload)) throw new ApiFailure('INVALID_DATA', correlationId);
+    return payload;
+  } catch (error) {
+    if (error instanceof ApiFailure) throw error;
+    if (options.signal?.aborted) throw error;
+    if (timeoutController.signal.aborted) throw new ApiFailure('TIMEOUT', correlationId);
+    throw new ApiFailure(error instanceof SyntaxError ? 'INVALID_DATA' : 'NETWORK', correlationId);
   } finally {
-    clearTimeout(timer);
-    opts.signal?.removeEventListener('abort', onAbort);
+    clearTimeout(timeoutHandle);
+    options.signal?.removeEventListener('abort', abortOnCallerSignal);
   }
 }
 
 export const api = {
-  overview: (base: string, days: number, signal?: AbortSignal) =>
-    request(base, `/api/v1/emissions/overview?periodDays=${encodeURIComponent(days)}`, { guard: guards.overview, signal }),
-  analysis: (base: string, cid: string, signal?: AbortSignal) =>
-    request(base, '/api/v1/hotspots/analysis', { guard: guards.analysis, signal, correlationId: cid }),
-  recommendation: (base: string, signal?: AbortSignal) =>
-    request(base, '/api/v1/recommendations/current', { guard: guards.recommendation, signal }),
-  simulate: (base: string, params: Partial<AnalysisParams>, signal?: AbortSignal) =>
-    request(base, '/api/v1/simulations', { method: 'POST', body: params, guard: guards.simulation, signal }),
-  methodology: (base: string, signal?: AbortSignal) =>
-    request(base, '/api/v1/methodology', { guard: guards.methodology, signal }),
+  overview: (baseUrl: string, periodDays: number, signal?: AbortSignal) =>
+    request(baseUrl, `/api/v1/emissions/overview?periodDays=${encodeURIComponent(periodDays)}`, { guard: guards.overview, signal }),
+  analysis: (baseUrl: string, correlationId: string, signal?: AbortSignal) =>
+    request(baseUrl, '/api/v1/hotspots/analysis', { guard: guards.analysis, signal, correlationId }),
+  recommendation: (baseUrl: string, signal?: AbortSignal) =>
+    request(baseUrl, '/api/v1/recommendations/current', { guard: guards.recommendation, signal }),
+  simulate: (baseUrl: string, params: Partial<AnalysisParams>, signal?: AbortSignal) =>
+    request(baseUrl, '/api/v1/simulations', { method: 'POST', body: params, guard: guards.simulation, signal }),
+  methodology: (baseUrl: string, signal?: AbortSignal) =>
+    request(baseUrl, '/api/v1/methodology', { guard: guards.methodology, signal }),
 };
 
 export type { EventName };

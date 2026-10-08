@@ -7,16 +7,16 @@ import { AdvisoryBanner } from './StateViews';
 
 interface Props { recommendation: Recommendation; onSelect: () => void }
 
-const List = ({ title, items }: { title: string; items: string[] }) => (
+const TitledList = ({ title, items }: { title: string; items: string[] }) => (
   <section>
     <Typography variant="h6" component="h4" fontWeight={600}>{title}</Typography>
-    <ul style={{ marginTop: 4 }}>{items.map((i) => <li key={i}>{i}</li>)}</ul>
+    <ul style={{ marginTop: 4 }}>{items.map((item) => <li key={item}>{item}</li>)}</ul>
   </section>
 );
 
-export function RecommendationCard({ recommendation: r, onSelect }: Props) {
-  const [open, setOpen] = useState(false);
-  const [selected, setSelected] = useState(false);
+export function RecommendationCard({ recommendation, onSelect }: Props) {
+  const [isReviewDialogOpen, setReviewDialogOpen] = useState(false);
+  const [isMarkedForReview, setMarkedForReview] = useState(false);
   return (
     <Card aria-labelledby="rec-title">
       <CardContent sx={{ display: 'grid', gap: 1.5 }}>
@@ -25,30 +25,35 @@ export function RecommendationCard({ recommendation: r, onSelect }: Props) {
         <Chip color="warning" label="Advisory only" />
         <Chip variant="outlined" label="Human review required" />
       </div>
-      <Typography component="p">{r.action}</Typography>
-      <Typography component="p"><strong>Rationale: </strong>{r.rationale}</Typography>
+      <Typography component="p">{recommendation.action}</Typography>
+      <Typography component="p"><strong>Rationale: </strong>{recommendation.rationale}</Typography>
       <Typography component="p">
-        <strong>Expected reduction (simulated estimate): </strong>{r.expectedReductionKgCO2e.toLocaleString('en-US')} kgCO2e
+        <strong>Expected reduction (simulated estimate): </strong>{recommendation.expectedReductionKgCO2e.toLocaleString('en-US')} kgCO2e
       </Typography>
-      <Typography component="p"><strong>Effort / cost: </strong>{r.effort} ({r.costCategory})</Typography>
-      <List title="Assumptions" items={r.assumptions} />
-      <List title="Dependencies" items={r.dependencies} />
-      <List title="Operational limitations" items={r.limitations} />
-      <Typography component="p"><strong>Reversibility: </strong>{r.reversibility}</Typography>
-      <Typography component="p"><strong>Human review: </strong>{r.humanReview}</Typography>
-      <AdvisoryBanner text={r.disclaimer} />
-      <Button variant="contained" disabled={selected} onClick={() => setOpen(true)}>
-            {selected ? 'Marked for review' : 'Mark for operational review'}
+      <Typography component="p"><strong>Effort / cost: </strong>{recommendation.effort} ({recommendation.costCategory})</Typography>
+      <TitledList title="Assumptions" items={recommendation.assumptions} />
+      <TitledList title="Dependencies" items={recommendation.dependencies} />
+      <TitledList title="Operational limitations" items={recommendation.limitations} />
+      <Typography component="p"><strong>Reversibility: </strong>{recommendation.reversibility}</Typography>
+      <Typography component="p"><strong>Human review: </strong>{recommendation.humanReview}</Typography>
+      <AdvisoryBanner text={recommendation.disclaimer} />
+      <Button variant="contained" disabled={isMarkedForReview} onClick={() => setReviewDialogOpen(true)}>
+            {isMarkedForReview ? 'Marked for review' : 'Mark for operational review'}
       </Button>
-      <Dialog open={open} onClose={() => setOpen(false)} aria-labelledby="review-dialog-title">
+      <Dialog open={isReviewDialogOpen} onClose={() => setReviewDialogOpen(false)} aria-labelledby="review-dialog-title">
             <DialogTitle id="review-dialog-title">Mark for operational review?</DialogTitle>
             <DialogContent>
               This only flags the recommendation for review by authorised operations and safety personnel. It does not
               change, schedule or control any airport equipment or procedure.
             </DialogContent>
             <DialogActions>
-              <Button onClick={() => setOpen(false)}>Cancel</Button>
-              <Button variant="contained" onClick={() => { setSelected(true); setOpen(false); onSelect(); }}>Confirm</Button>
+              <Button onClick={() => setReviewDialogOpen(false)}>Cancel</Button>
+              <Button
+                variant="contained"
+                onClick={() => { setMarkedForReview(true); setReviewDialogOpen(false); onSelect(); }}
+              >
+                Confirm
+              </Button>
             </DialogActions>
       </Dialog>
       </CardContent>

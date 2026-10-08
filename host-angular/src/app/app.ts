@@ -16,7 +16,7 @@ import { ThemeService } from './core/theme.service';
   styleUrl: './app.css',
 })
 export class App {
-  protected readonly cfg = inject(APP_CONFIG);
+  protected readonly appConfig = inject(APP_CONFIG);
   protected readonly notices = inject(NotificationService);
   protected readonly theme = inject(ThemeService);
   private readonly router = inject(Router);
@@ -32,19 +32,19 @@ export class App {
 
   protected readonly crumb = toSignal(
     this.router.events.pipe(
-      filter((e) => e instanceof NavigationEnd),
+      filter((event) => event instanceof NavigationEnd),
       startWith(null),
       map(() => {
-        let r = this.router.routerState.snapshot.root;
-        while (r.firstChild) r = r.firstChild;
-        return (r.data['title'] as string | undefined) ?? '';
+        let activeRoute = this.router.routerState.snapshot.root;
+        while (activeRoute.firstChild) activeRoute = activeRoute.firstChild;
+        return (activeRoute.data['title'] as string | undefined) ?? '';
       }),
     ),
     { initialValue: '' },
   );
 
   constructor() {
-    this.http.get(`${this.cfg.apiBaseUrl}/api/v1/health`).subscribe({
+    this.http.get(`${this.appConfig.apiBaseUrl}/api/v1/health`).subscribe({
       next: () => this.apiHealthy.set(true),
       error: () => this.apiHealthy.set(false),
     });

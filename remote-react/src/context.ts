@@ -10,9 +10,9 @@ export interface RemoteContextValue {
 export const RemoteContext = createContext<RemoteContextValue | null>(null);
 
 export function useRemote(): RemoteContextValue {
-  const v = useContext(RemoteContext);
-  if (!v) throw new Error('RemoteContext missing');
-  return v;
+  const context = useContext(RemoteContext);
+  if (!context) throw new Error('RemoteContext missing');
+  return context;
 }
 
 export const makePublisher =

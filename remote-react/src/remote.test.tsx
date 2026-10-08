@@ -83,42 +83,42 @@ describe('remote mount contract', () => {
 
   it('is idempotent and unmounts cleanly', () => {
     stubFetch();
-    const el = document.createElement('div');
-    document.body.append(el);
-    const h1 = mount(el, props('overview'));
-    const h2 = mount(el, props('overview'));
-    expect(h2).toBe(h1);
-    h1.unmount();
-    h1.unmount(); // safe to call twice
-    expect(el.childElementCount).toBe(0);
-    el.remove();
+    const container = document.createElement('div');
+    document.body.append(container);
+    const firstHandle = mount(container, props('overview'));
+    const secondHandle = mount(container, props('overview'));
+    expect(secondHandle).toBe(firstHandle);
+    firstHandle.unmount();
+    firstHandle.unmount(); // safe to call twice
+    expect(container.childElementCount).toBe(0);
+    container.remove();
   });
 
   it('publishes started and completed events for the hotspot view', async () => {
     stubFetch();
-    const el = document.createElement('div');
-    document.body.append(el);
-    const seen: string[] = [];
-    const stop = listen(el, (name) => seen.push(name));
-    const h = mount(el, props('hotspot'));
-    await waitFor(() => expect(seen).toContain(EVENT_NAMES.analysisCompleted));
-    expect(seen[0]).toBe(EVENT_NAMES.analysisStarted);
-    stop();
-    h.unmount();
-    el.remove();
+    const container = document.createElement('div');
+    document.body.append(container);
+    const seenEvents: string[] = [];
+    const stopListening = listen(container, (name) => seenEvents.push(name));
+    const handle = mount(container, props('hotspot'));
+    await waitFor(() => expect(seenEvents).toContain(EVENT_NAMES.analysisCompleted));
+    expect(seenEvents[0]).toBe(EVENT_NAMES.analysisStarted);
+    stopListening();
+    handle.unmount();
+    container.remove();
   });
 
   it('publishes analysis-failed and shows an error state when the API is unavailable', async () => {
     stubFetch(true);
-    const el = document.createElement('div');
-    document.body.append(el);
-    const seen: string[] = [];
-    const stop = listen(el, (name) => seen.push(name));
-    const h = mount(el, props('hotspot'));
-    await waitFor(() => expect(seen).toContain(EVENT_NAMES.analysisFailed));
+    const container = document.createElement('div');
+    document.body.append(container);
+    const seenEvents: string[] = [];
+    const stopListening = listen(container, (name) => seenEvents.push(name));
+    const handle = mount(container, props('hotspot'));
+    await waitFor(() => expect(seenEvents).toContain(EVENT_NAMES.analysisFailed));
     expect(await screen.findByText('Unable to load data')).toBeInTheDocument();
-    stop();
-    h.unmount();
-    el.remove();
+    stopListening();
+    handle.unmount();
+    container.remove();
   });
 });

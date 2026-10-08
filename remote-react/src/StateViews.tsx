@@ -57,5 +57,6 @@ export type Kind = 'measured' | 'derived' | 'simulated';
 // Icon-free text label so the distinction does not rely on colour alone.
 export function KindBadge({ kind }: { kind: Kind }) {
   const color = kind === 'measured' ? 'success' : kind === 'derived' ? 'primary' : 'warning';
-  return <Chip variant="outlined" color={color} size="small" label={kind === 'simulated' ? 'Simulated estimate' : kind === 'derived' ? 'Derived' : 'Measured'} />;
+  const label = kind === 'simulated' ? 'Simulated estimate' : kind === 'derived' ? 'Derived' : 'Measured';
+  return <Chip variant="outlined" color={color} size="small" label={label} />;
 }
