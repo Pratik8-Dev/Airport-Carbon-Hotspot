@@ -1,0 +1,17 @@
+{
+  "name": "airport-carbon-hotspot",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "api": "tsx mock-api/server.ts",
+    "test:contracts": "vitest run",
+    "audit": "npm audit --audit-level=high"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.5",
+    "tsx": "4.19.2",
+    "typescript": "5.9.3",
+    "vitest": "3.0.5"
+  }
+}

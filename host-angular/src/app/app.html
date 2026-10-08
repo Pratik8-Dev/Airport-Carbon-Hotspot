@@ -1,0 +1,53 @@
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<header class="header">
+  <div class="brand">
+    <strong>Airport Carbon Hotspot</strong>
+    <span class="badge">Synthetic data</span>
+    <span class="badge env" [attr.data-env]="cfg.environmentName">Environment: {{ cfg.environmentName }}</span>
+    <span class="badge" [class.bad]="apiHealthy() === false">
+      Data service: {{ apiHealthy() === null ? 'checking' : apiHealthy() ? 'available' : 'unavailable' }}
+    </span>
+  </div>
+  <div class="controls">
+    <label for="theme">Theme</label>
+    <select id="theme" [value]="theme.theme()" (change)="setTheme($any($event.target).value)">
+      @for (t of theme.options; track t) {
+        <option [value]="t">{{ t }}</option>
+      }
+    </select>
+  </div>
+</header>
+
+<nav class="nav" aria-label="Primary">
+  @for (item of nav; track item.path) {
+    <a [routerLink]="item.path" routerLinkActive="active" ariaCurrentWhenActive="page">{{ item.label }}</a>
+  }
+</nav>
+
+<nav class="crumbs" aria-label="Breadcrumb">
+  <ol>
+    <li><a routerLink="/overview">Home</a></li>
+    @if (crumb()) {
+      <li aria-current="page">{{ crumb() }}</li>
+    }
+  </ol>
+</nav>
+
+<div class="notices" aria-label="Notifications">
+  @for (n of notices.notices(); track n.id) {
+    <div class="notice" [class.error]="n.kind === 'error'">
+      <span>{{ n.text }}</span>
+      <button type="button" (click)="notices.dismiss(n.id)" aria-label="Dismiss notification">Dismiss</button>
+    </div>
+  }
+</div>
+
+<main id="main" tabindex="-1">
+  <router-outlet />
+</main>
+
+<footer class="footer">
+  Advisory only. All data is synthetic and fictional. Operational and safety procedures take precedence. This tool is not
+  connected to, and cannot control, any airport system.
+</footer>

@@ -1,0 +1,17 @@
+:root, [data-theme='light'] {
+  --bg: #f5f5f5; --surface: #ffffff; --fg: #242424; --border: #c8c8c8; --accent: #0f6cbd; --danger: #b10e1c;
+  --header-bg: #0f548c; --header-fg: #ffffff;
+  color-scheme: light;
+}
+[data-theme='dark'] {
+  --bg: #1f1f1f; --surface: #292929; --fg: #ffffff; --border: #666666; --accent: #479ef5; --danger: #f1707b;
+  --header-bg: #0a2e4d; --header-fg: #ffffff;
+  color-scheme: dark;
+}
+[data-theme='high-contrast'] {
+  --bg: #000000; --surface: #000000; --fg: #ffffff; --border: #ffffff; --accent: #ffff00; --danger: #ff6666;
+  --header-bg: #000000; --header-fg: #ffffff;
+  color-scheme: dark;
+}
+html, body { margin: 0; background: var(--bg); color: var(--fg); font-family: 'Segoe UI', system-ui, sans-serif; }
+.remote-container { min-height: 120px; }
